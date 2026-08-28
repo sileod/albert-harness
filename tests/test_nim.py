@@ -38,12 +38,21 @@ class NimHarnessTests(unittest.TestCase):
         self.assertEqual(config["provider"]["nim"]["options"]["apiKey"], "{env:NVIDIA_API_KEY}")
         self.assertEqual(config["provider"]["nim"]["options"]["baseURL"], "https://nim.example/v1")
 
-    def test_litellm_bridge_uses_custom_openai(self):
+    def test_litellm_bridge_forces_chat_completions(self):
         config = core.litellm_config(self.provider, "openai/gpt-oss-120b")
+        self.assertIn('model: "openai/openai/gpt-oss-120b"', config)
+        self.assertIn("use_chat_completions_api: true", config)
         self.assertIn("drop_params: true", config)
-        self.assertIn("custom_openai/openai/gpt-oss-120b", config)
         self.assertIn("api_key: os.environ/NVIDIA_API_KEY", config)
+        self.assertNotIn("custom_openai/", config)
         self.assertNotIn(os.environ.get("NVIDIA_API_KEY", "secret-that-should-not-appear"), config)
+
+    def test_hermes_is_a_first_class_command(self):
+        parser = core.parser(self.provider)
+        args, rest = parser.parse_known_args(["hermes", "--model", "openai/gpt-oss-20b", "hello"])
+        self.assertEqual(args.command, "hermes")
+        self.assertEqual(args.model, "openai/gpt-oss-20b")
+        self.assertEqual(rest, ["hello"])
 
 
 if __name__ == "__main__":
