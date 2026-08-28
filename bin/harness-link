@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from typing import Optional
 import urllib.error
 import urllib.request
 
@@ -24,7 +25,7 @@ class Provider:
     model_env: str
     default_model: str
     debug_env: str
-    opencode_limits: dict | None = None
+    opencode_limits: Optional[dict] = None
     claude_experimental: bool = False
 
     @property
@@ -58,6 +59,7 @@ PROVIDERS = {
         model_env="NIM_MODEL",
         default_model="openai/gpt-oss-120b",
         debug_env="NIM_DEBUG",
+        claude_experimental=True,
     ),
 }
 
@@ -130,6 +132,20 @@ def cmd_opencode(provider, args):
     os.execvpe(executable, [executable, *args.harness_args], env)
 
 
+def cmd_hermes(provider, args):
+    key = require_key(provider)
+    executable = require_command(provider, "hermes", "See https://github.com/NousResearch/hermes-agent")
+    env = os.environ.copy()
+    env.update(
+        {
+            "OPENAI_BASE_URL": provider.base_url,
+            "OPENAI_API_KEY": key,
+            "LLM_MODEL": args.model,
+        }
+    )
+    os.execvpe(executable, [executable, *args.harness_args], env)
+
+
 def free_port():
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -137,30 +153,52 @@ def free_port():
 
 
 def litellm_config(provider, model):
+    model_name = json.dumps(model)
+    route_model = json.dumps(f"openai/{model}")
+    api_base = json.dumps(provider.base_url)
     return (
         "litellm_settings:\n"
         "  drop_params: true\n"
         "model_list:\n"
-        f"  - model_name: {model}\n"
+        f"  - model_name: {model_name}\n"
         "    litellm_params:\n"
-        f"      model: custom_openai/{model}\n"
-        f"      api_base: {provider.base_url}\n"
+        f"      model: {route_model}\n"
+        f"      api_base: {api_base}\n"
         f"      api_key: os.environ/{provider.key_env}\n"
+        "      use_chat_completions_api: true\n"
     )
 
 
-def wait_for_port(provider, process, port, timeout=15):
+def bridge_timeout():
+    raw = os.environ.get("HARNESS_LINK_BRIDGE_TIMEOUT", "20")
+    try:
+        value = float(raw)
+    except ValueError:
+        return 20.0
+    return max(2.0, value)
+
+
+def wait_for_bridge(provider, process, port, timeout=None):
+    timeout = bridge_timeout() if timeout is None else timeout
     deadline = time.monotonic() + timeout
+    url = f"http://127.0.0.1:{port}/health/liveliness"
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            die(provider, "LiteLLM bridge exited during startup")
+            die(provider, "LiteLLM bridge exited during startup; set the provider DEBUG=1 for logs")
         try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
-                return
-        except OSError:
-            time.sleep(0.1)
-    process.terminate()
-    die(provider, "LiteLLM bridge did not start")
+            with urllib.request.urlopen(url, timeout=0.5) as response:
+                if response.status == 200:
+                    return
+        except (urllib.error.URLError, TimeoutError, socket.timeout):
+            pass
+        time.sleep(0.15)
+    if process.poll() is None:
+        process.terminate()
+    die(
+        provider,
+        "LiteLLM bridge did not become HTTP-ready. "
+        f"Set {provider.debug_env}=1 for logs or use opencode/hermes, which connect directly.",
+    )
 
 
 def run_with_bridge(provider, model, callback):
@@ -184,7 +222,7 @@ def run_with_bridge(provider, model, callback):
             **stdio,
         )
         try:
-            wait_for_port(provider, process, port)
+            wait_for_bridge(provider, process, port)
             return callback(port)
         finally:
             if process.poll() is None:
@@ -207,6 +245,7 @@ def cmd_codex(provider, args):
             f'env_key = "{proxy_env}", wire_api = "responses", requires_openai_auth = false }}'
         )
         env = os.environ.copy()
+        env.pop(provider.key_env, None)
         env[proxy_env] = "local"
         command = [
             executable,
@@ -228,10 +267,12 @@ def cmd_claude(provider, args):
 
     def launch(port):
         env = os.environ.copy()
+        env.pop(provider.key_env, None)
         env.update(
             {
                 "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{port}",
                 "ANTHROPIC_AUTH_TOKEN": "local",
+                "ANTHROPIC_API_KEY": "",
                 "ANTHROPIC_MODEL": args.model,
                 "ANTHROPIC_DEFAULT_HAIKU_MODEL": args.model,
                 "ANTHROPIC_DEFAULT_OPUS_MODEL": args.model,
@@ -242,7 +283,7 @@ def cmd_claude(provider, args):
         return subprocess.call([executable, "--model", args.model, *args.harness_args], env=env)
 
     if provider.claude_experimental:
-        print(f"{provider.slug}: Claude Code support is experimental", file=sys.stderr)
+        print(f"{provider.slug}: Claude Code bridge is experimental", file=sys.stderr)
     raise SystemExit(run_with_bridge(provider, args.model, launch))
 
 
@@ -253,7 +294,7 @@ def cmd_models(provider, _args):
         headers={"Authorization": f"Bearer {key}", "Accept": "application/json"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=15) as response:
+        with urllib.request.urlopen(request, timeout=30) as response:
             payload = json.load(response)
     except urllib.error.HTTPError as exc:
         die(provider, f"{provider.name} returned HTTP {exc.code}")
@@ -279,13 +320,14 @@ def parser(provider):
         prog=provider.slug,
         description=f"Run coding harnesses against {provider.name}",
     )
-    root.add_argument("--version", action="version", version=f"harness-link {provider.slug} 0.2.0")
+    root.add_argument("--version", action="version", version=f"harness-link {provider.slug} 0.2.1")
     sub = root.add_subparsers(dest="command", required=True)
 
     commands = [
         ("opencode", cmd_opencode, f"Run OpenCode directly against {provider.name}"),
-        ("codex", cmd_codex, "Run Codex through a local Responses bridge"),
-        ("claude", cmd_claude, "Run Claude Code through a local Messages bridge"),
+        ("hermes", cmd_hermes, f"Run Hermes directly against {provider.name}"),
+        ("codex", cmd_codex, "Run Codex through the experimental Responses bridge"),
+        ("claude", cmd_claude, "Run Claude Code through the experimental Messages bridge"),
     ]
     for name, handler, help_text in commands:
         command = sub.add_parser(name, help=help_text)
