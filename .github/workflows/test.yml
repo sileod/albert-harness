@@ -12,6 +12,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - uses: oven-sh/setup-bun@v2
       - run: python -m unittest discover -s tests -v
-      - run: python -m py_compile bin/albert
+      - run: python -m py_compile bin/albert bin/albert-spawn
       - run: bash -n install.sh
+      - run: ALBERT_API_KEY=test python bin/albert-spawn matrix >/dev/null
