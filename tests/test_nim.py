@@ -2,29 +2,36 @@ import importlib.machinery
 import importlib.util
 import os
 from pathlib import Path
+import sys
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-loader = importlib.machinery.SourceFileLoader("nim_cli", str(ROOT / "bin" / "nim"))
+loader = importlib.machinery.SourceFileLoader("harness_link_cli_nim", str(ROOT / "bin" / "harness-link"))
 spec = importlib.util.spec_from_loader(loader.name, loader)
-nim = importlib.util.module_from_spec(spec)
-loader.exec_module(nim)
+core = importlib.util.module_from_spec(spec)
+sys.modules[loader.name] = core
+loader.exec_module(core)
 
 
 class NimHarnessTests(unittest.TestCase):
     def setUp(self):
-        self.old_base = nim.API_BASE
-        nim.API_BASE = "https://nim.example/v1"
+        self.provider = core.PROVIDERS["nim"]
+        self.old_base = os.environ.get("NIM_BASE_URL")
+        os.environ["NIM_BASE_URL"] = "https://nim.example/v1"
 
     def tearDown(self):
-        nim.API_BASE = self.old_base
+        if self.old_base is None:
+            os.environ.pop("NIM_BASE_URL", None)
+        else:
+            os.environ["NIM_BASE_URL"] = self.old_base
 
-    def test_default_model(self):
-        self.assertEqual(nim.DEFAULT_MODEL, os.environ.get("NIM_MODEL", "openai/gpt-oss-120b"))
+    def test_provider_defaults(self):
+        self.assertEqual(self.provider.default_model, "openai/gpt-oss-120b")
+        self.assertEqual(self.provider.key_env, "NVIDIA_API_KEY")
 
     def test_opencode_config_preserves_existing_settings(self):
         existing = {"theme": "system", "provider": {"other": {"name": "Other"}}}
-        config = nim.opencode_config("openai/gpt-oss-120b", existing)
+        config = core.opencode_config(self.provider, "openai/gpt-oss-120b", existing)
         self.assertEqual(config["theme"], "system")
         self.assertEqual(config["provider"]["other"]["name"], "Other")
         self.assertEqual(config["model"], "nim/openai/gpt-oss-120b")
@@ -32,7 +39,7 @@ class NimHarnessTests(unittest.TestCase):
         self.assertEqual(config["provider"]["nim"]["options"]["baseURL"], "https://nim.example/v1")
 
     def test_litellm_bridge_uses_custom_openai(self):
-        config = nim.litellm_config("openai/gpt-oss-120b")
+        config = core.litellm_config(self.provider, "openai/gpt-oss-120b")
         self.assertIn("drop_params: true", config)
         self.assertIn("custom_openai/openai/gpt-oss-120b", config)
         self.assertIn("api_key: os.environ/NVIDIA_API_KEY", config)
