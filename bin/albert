@@ -4,4 +4,4 @@ from pathlib import Path
 import sys
 
 runtime = Path(__file__).resolve().with_name("harness-link")
-os.execv(runtime, [str(runtime), "albert", *sys.argv[1:]])
+os.execv(sys.executable, [sys.executable, str(runtime), "albert", *sys.argv[1:]])
