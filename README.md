@@ -106,12 +106,7 @@ Spawn support requires `git` and Bun. The first invocation downloads and compile
 
 ## Design
 
-Harness Link stays deliberately small:
-
-1. Native harness configuration when possible.
-2. A tiny provider adapter when configuration differs.
-3. A loopback bridge only when protocol translation is required.
-4. No hidden provider fallback.
+Harness Link stays deliberately small: native harness configuration when possible, a tiny provider adapter when configuration differs, a loopback bridge only when protocol translation is required, and no hidden provider fallback.
 
 Arguments not consumed by Harness Link are passed through to the selected harness.
 
