@@ -1,0 +1,435 @@
+import argparse
+import json
+import os
+from pathlib import Path
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+
+from . import __version__
+from .providers import PROVIDERS, Provider, fetch_free_models, require_key, resolve_model
+
+
+MODEL_COMMANDS = {"opencode", "hermes", "codex", "claude", "mini"}
+
+
+def die(provider: Provider, message: str, code: int = 1):
+    print(f"{provider.slug}: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def provider_key(provider: Provider) -> str:
+    try:
+        return require_key(provider)
+    except RuntimeError as exc:
+        die(provider, str(exc))
+
+
+def require_command(provider: Provider, name: str, install_hint: str) -> str:
+    path = shutil.which(name)
+    if not path:
+        die(provider, f"{name} is not installed. {install_hint}")
+    return path
+
+
+def deep_merge(base, overlay):
+    if not isinstance(base, dict) or not isinstance(overlay, dict):
+        return overlay
+    result = dict(base)
+    for key, value in overlay.items():
+        result[key] = deep_merge(result.get(key), value) if key in result else value
+    return result
+
+
+def opencode_config(provider: Provider, model: str, existing=None):
+    model_config = {"name": model}
+    if provider.opencode_limits:
+        model_config["limit"] = provider.opencode_limits
+    config = {
+        "$schema": "https://opencode.ai/config.json",
+        "provider": {
+            provider.slug: {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": provider.name,
+                "options": {
+                    "baseURL": provider.base_url,
+                    "apiKey": f"{{env:{provider.key_env}}}",
+                },
+                "models": {model: model_config},
+            }
+        },
+        "model": f"{provider.slug}/{model}",
+        "small_model": f"{provider.slug}/{model}",
+    }
+    return deep_merge(existing or {}, config)
+
+
+def cmd_opencode(provider: Provider, args):
+    provider_key(provider)
+    executable = require_command(provider, "opencode", "See https://opencode.ai/docs/")
+    existing = {}
+    raw = os.environ.get("OPENCODE_CONFIG_CONTENT")
+    if raw:
+        try:
+            existing = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            die(provider, f"OPENCODE_CONFIG_CONTENT is not valid JSON: {exc}")
+    env = os.environ.copy()
+    env["OPENCODE_CONFIG_CONTENT"] = json.dumps(
+        opencode_config(provider, args.model, existing), separators=(",", ":")
+    )
+    os.execvpe(executable, [executable, *args.harness_args], env)
+
+
+def cmd_hermes(provider: Provider, args):
+    key = provider_key(provider)
+    executable = require_command(provider, "hermes", "See https://github.com/NousResearch/hermes-agent")
+    env = os.environ.copy()
+    env.update(
+        {
+            "OPENAI_BASE_URL": provider.base_url,
+            "OPENAI_API_KEY": key,
+            "LLM_MODEL": args.model,
+        }
+    )
+    os.execvpe(executable, [executable, *args.harness_args], env)
+
+
+def mini_config(provider: Provider, model: str) -> str:
+    return (
+        "model:\n"
+        f"  model_name: {json.dumps('openai/' + model)}\n"
+        "  model_kwargs:\n"
+        '    custom_llm_provider: "openai"\n'
+        f"    api_base: {json.dumps(provider.base_url)}\n"
+        '  cost_tracking: "ignore_errors"\n'
+    )
+
+
+def _extract_mini_configs(arguments):
+    configs = []
+    rest = []
+    index = 0
+    while index < len(arguments):
+        arg = arguments[index]
+        if arg in {"-c", "--config"}:
+            if index + 1 >= len(arguments):
+                rest.append(arg)
+                index += 1
+                continue
+            configs.append(arguments[index + 1])
+            index += 2
+            continue
+        if arg.startswith("--config="):
+            configs.append(arg.split("=", 1)[1])
+            index += 1
+            continue
+        rest.append(arg)
+        index += 1
+    return configs, rest
+
+
+def cmd_mini(provider: Provider, args):
+    key = provider_key(provider)
+    executable = require_command(
+        provider,
+        "mini",
+        "Install mini-SWE-agent with `uv tool install mini-swe-agent` or `pipx install mini-swe-agent`.",
+    )
+    configs, forwarded = _extract_mini_configs(args.harness_args)
+    with tempfile.TemporaryDirectory(prefix=f"harness-link-mini-{provider.slug}-") as tmp:
+        override = Path(tmp) / "provider.yaml"
+        override.write_text(mini_config(provider, args.model), encoding="utf-8")
+        command = [executable]
+        if configs:
+            for config in configs:
+                command.extend(["-c", config])
+        else:
+            command.extend(["-c", "mini.yaml"])
+        command.extend(["-c", str(override), *forwarded])
+        env = os.environ.copy()
+        env["OPENAI_API_KEY"] = key
+        env["MSWEA_CONFIGURED"] = "1"
+        raise SystemExit(subprocess.call(command, env=env))
+
+
+def free_port():
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def litellm_config(provider: Provider, model: str) -> str:
+    model_name = json.dumps(model)
+    route_model = json.dumps(f"openai/{model}")
+    api_base = json.dumps(provider.base_url)
+    return (
+        "litellm_settings:\n"
+        "  drop_params: true\n"
+        "model_list:\n"
+        f"  - model_name: {model_name}\n"
+        "    litellm_params:\n"
+        f"      model: {route_model}\n"
+        f"      api_base: {api_base}\n"
+        f"      api_key: os.environ/{provider.key_env}\n"
+        "      use_chat_completions_api: true\n"
+    )
+
+
+def bridge_timeout() -> float:
+    raw = os.environ.get("HARNESS_LINK_BRIDGE_TIMEOUT", "20")
+    try:
+        value = float(raw)
+    except ValueError:
+        return 20.0
+    return max(2.0, value)
+
+
+def wait_for_bridge(provider: Provider, process, port: int, timeout=None):
+    timeout = bridge_timeout() if timeout is None else timeout
+    deadline = time.monotonic() + timeout
+    url = f"http://127.0.0.1:{port}/health/liveliness"
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            die(provider, f"LiteLLM bridge exited during startup; set {provider.debug_env}=1 for logs")
+        try:
+            with urllib.request.urlopen(url, timeout=0.5) as response:
+                if response.status == 200:
+                    return
+        except (urllib.error.URLError, TimeoutError, socket.timeout):
+            pass
+        time.sleep(0.15)
+    if process.poll() is None:
+        process.terminate()
+    die(
+        provider,
+        "LiteLLM bridge did not become HTTP-ready. "
+        f"Set {provider.debug_env}=1 for logs or use opencode/hermes/mini, which connect directly.",
+    )
+
+
+def run_with_bridge(provider: Provider, model: str, callback):
+    provider_key(provider)
+    litellm = require_command(
+        provider,
+        "litellm",
+        "Install the bridge with `python -m pip install 'litellm[proxy]'`.",
+    )
+    port = free_port()
+    with tempfile.TemporaryDirectory(prefix=f"harness-link-{provider.slug}-") as tmp:
+        config_path = Path(tmp) / "litellm.yaml"
+        config_path.write_text(litellm_config(provider, model), encoding="utf-8")
+        debug = os.environ.get(provider.debug_env) == "1"
+        stdio = {} if debug else {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+        bridge_env = os.environ.copy()
+        bridge_env["LITELLM_USE_CHAT_COMPLETIONS_URL_FOR_ANTHROPIC_MESSAGES"] = "true"
+        process = subprocess.Popen(
+            [litellm, "--config", str(config_path), "--host", "127.0.0.1", "--port", str(port)],
+            env=bridge_env,
+            **stdio,
+        )
+        try:
+            wait_for_bridge(provider, process, port)
+            return callback(port)
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+
+
+def _codex_provider_config(provider: Provider, base_url: str, env_key: str) -> str:
+    return (
+        f'{{ name = "{provider.name}", '
+        f'base_url = "{base_url}", '
+        f'env_key = "{env_key}", wire_api = "responses", requires_openai_auth = false }}'
+    )
+
+
+def cmd_codex(provider: Provider, args):
+    executable = require_command(provider, "codex", "See https://developers.openai.com/codex/cli/")
+    if provider.direct_responses:
+        provider_key(provider)
+        env = os.environ.copy()
+        config = _codex_provider_config(provider, provider.base_url, provider.key_env)
+        command = [
+            executable,
+            "-c",
+            f'model_provider="{provider.slug}"',
+            "-c",
+            f'model="{args.model}"',
+            "-c",
+            f"model_providers.{provider.slug}={config}",
+            *args.harness_args,
+        ]
+        raise SystemExit(subprocess.call(command, env=env))
+
+    def launch(port):
+        proxy_env = f"HARNESS_LINK_{provider.slug.upper()}_PROXY_KEY"
+        config = _codex_provider_config(provider, f"http://127.0.0.1:{port}/v1", proxy_env)
+        env = os.environ.copy()
+        env.pop(provider.key_env, None)
+        env[proxy_env] = "local"
+        command = [
+            executable,
+            "-c",
+            f'model_provider="{provider.slug}"',
+            "-c",
+            f'model="{args.model}"',
+            "-c",
+            f"model_providers.{provider.slug}={config}",
+            *args.harness_args,
+        ]
+        return subprocess.call(command, env=env)
+
+    raise SystemExit(run_with_bridge(provider, args.model, launch))
+
+
+def _claude_env(provider: Provider, model: str, base_url: str, token: str):
+    env = os.environ.copy()
+    env.update(
+        {
+            "ANTHROPIC_BASE_URL": base_url,
+            "ANTHROPIC_AUTH_TOKEN": token,
+            "ANTHROPIC_API_KEY": "",
+            "ANTHROPIC_MODEL": model,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": model,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
+            "CLAUDE_CODE_SUBAGENT_MODEL": model,
+        }
+    )
+    return env
+
+
+def cmd_claude(provider: Provider, args):
+    executable = require_command(provider, "claude", "See https://docs.anthropic.com/en/docs/claude-code/")
+    if provider.direct_messages:
+        key = provider_key(provider)
+        base = provider.anthropic_base or provider.base_url.rsplit("/v1", 1)[0]
+        env = _claude_env(provider, args.model, base, key)
+        raise SystemExit(subprocess.call([executable, "--model", args.model, *args.harness_args], env=env))
+
+    def launch(port):
+        env = _claude_env(provider, args.model, f"http://127.0.0.1:{port}", "local")
+        env.pop(provider.key_env, None)
+        return subprocess.call([executable, "--model", args.model, *args.harness_args], env=env)
+
+    if provider.claude_experimental:
+        print(f"{provider.slug}: Claude Code bridge is experimental", file=sys.stderr)
+    raise SystemExit(run_with_bridge(provider, args.model, launch))
+
+
+def cmd_models(provider: Provider, _args):
+    if provider.dynamic_free:
+        try:
+            models = fetch_free_models(provider, timeout=15)
+        except RuntimeError as exc:
+            die(provider, str(exc))
+        except urllib.error.HTTPError as exc:
+            die(provider, f"OpenRouter returned HTTP {exc.code}")
+        except (urllib.error.URLError, TimeoutError) as exc:
+            die(provider, f"cannot reach OpenRouter: {exc}")
+        for model in models:
+            print(model)
+        return
+
+    key = provider_key(provider)
+    request = urllib.request.Request(
+        f"{provider.base_url}/models",
+        headers={"Authorization": f"Bearer {key}", "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = json.load(response)
+    except urllib.error.HTTPError as exc:
+        die(provider, f"{provider.name} returned HTTP {exc.code}")
+    except urllib.error.URLError as exc:
+        die(provider, f"cannot reach {provider.name}: {exc.reason}")
+    models = payload.get("data", payload if isinstance(payload, list) else [])
+    for model in models:
+        if isinstance(model, dict) and model.get("id"):
+            print(model["id"])
+
+
+def cmd_spawn(provider: Provider, args):
+    executable = require_command(
+        provider,
+        f"{provider.slug}-spawn",
+        "Re-run the Harness Link installer to add Spawn support.",
+    )
+    os.execvpe(executable, [executable, *args.harness_args], os.environ.copy())
+
+
+def parser(provider: Provider):
+    root = argparse.ArgumentParser(
+        prog=provider.slug,
+        description=f"Run coding harnesses against {provider.name}",
+    )
+    root.add_argument("--version", action="version", version=f"harness-link {provider.slug} {__version__}")
+    sub = root.add_subparsers(dest="command", required=True)
+
+    commands = [
+        ("opencode", cmd_opencode, f"Run OpenCode directly against {provider.name}"),
+        ("hermes", cmd_hermes, f"Run Hermes directly against {provider.name}"),
+        ("mini", cmd_mini, f"Run mini-SWE-agent directly against {provider.name}"),
+        (
+            "codex",
+            cmd_codex,
+            f"Run Codex {'directly' if provider.direct_responses else 'through the experimental Responses bridge'}",
+        ),
+        (
+            "claude",
+            cmd_claude,
+            f"Run Claude Code {'directly' if provider.direct_messages else 'through the experimental Messages bridge'}",
+        ),
+    ]
+    for name, handler, help_text in commands:
+        command = sub.add_parser(name, help=help_text)
+        command.add_argument("-m", "--model", default=None)
+        command.set_defaults(func=handler)
+
+    models = sub.add_parser("models", help=f"List model IDs returned by {provider.name}")
+    models.set_defaults(func=cmd_models)
+
+    spawn = sub.add_parser("spawn", help="Run an agent through the Spawn execution backend")
+    spawn.set_defaults(func=cmd_spawn)
+    return root
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv == ["--version"]:
+        print(f"harness-link {__version__}")
+        return
+    if not argv or argv[0] not in PROVIDERS:
+        names = ", ".join(PROVIDERS)
+        print(f"usage: harness-link <provider> ...\nproviders: {names}", file=sys.stderr)
+        raise SystemExit(2)
+    provider = PROVIDERS[argv.pop(0)]
+    root = parser(provider)
+    args, rest = root.parse_known_args(argv)
+    if args.command == "models" and rest:
+        root.error(f"unrecognized arguments: {' '.join(rest)}")
+    args.harness_args = rest[1:] if rest[:1] == ["--"] else rest
+    if args.command in MODEL_COMMANDS:
+        auto = provider.dynamic_free and args.model is None and not os.environ.get(provider.model_env, "").strip()
+        try:
+            args.model = resolve_model(provider, args.model)
+        except (RuntimeError, ValueError) as exc:
+            die(provider, str(exc))
+        if auto:
+            print(f"{provider.slug}: using {args.model}", file=sys.stderr)
+    args.func(provider, args)
+
+
+if __name__ == "__main__":
+    main()
