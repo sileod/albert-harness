@@ -7,22 +7,26 @@ Harness Link aims for OpenRouter Ori-like ergonomics: configure a provider once,
 ```sh
 export ALBERT_API_KEY=...
 albert opencode
-albert codex
+albert hermes
 
 export NVIDIA_API_KEY=...
 nim opencode
-nim codex
+nim hermes
 ```
 
-Native provider configuration is preferred. A loopback compatibility bridge is used only when the harness requires a protocol the provider does not expose directly.
+Native provider configuration is preferred. A loopback compatibility bridge is used only when a harness requires a protocol the provider does not expose directly.
 
 ## Install
 
+Python 3.9+ is required.
+
 ```sh
-curl -fsSL https://raw.githubusercontent.com/sileod/albert-harness/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/sileod/harness-link/main/install.sh | sh
 ```
 
-This installs the user-facing `albert` and `nim` commands plus their small shared Harness Link runtime to `~/.local/bin` by default. Override with `HARNESS_LINK_INSTALL_DIR` or the legacy `ALBERT_INSTALL_DIR`.
+This installs the user-facing `albert` and `nim` commands plus their small shared Harness Link runtime to `~/.local/bin` by default. Override with `HARNESS_LINK_INSTALL_DIR`.
+
+If you installed from the old `albert-harness` repository, run the command above once to replace stale launchers with the renamed repository's versions.
 
 ## Albert
 
@@ -33,19 +37,22 @@ export ALBERT_API_KEY=...
 
 albert models
 albert opencode
+albert hermes
 albert codex --full-auto
 albert claude -p "review this diff"
 ```
 
-OpenCode talks directly to Albert through `@ai-sdk/openai-compatible`.
+OpenCode and Hermes connect directly to Albert's OpenAI-compatible API, with no proxy in the request path.
 
-Codex speaks the OpenAI Responses API while Albert currently exposes Chat Completions. `albert codex` therefore starts a loopback-only LiteLLM bridge. Claude Code uses the same bridge for Anthropic Messages and remains experimental.
+Codex requires the OpenAI Responses API while Albert currently exposes Chat Completions. `albert codex` therefore starts a loopback-only LiteLLM bridge configured to explicitly translate Responses to Chat Completions. Claude Code uses the same bridge for Anthropic Messages and is experimental.
 
 For Codex and Claude Code:
 
 ```sh
 python -m pip install 'litellm[proxy]'
 ```
+
+The bridge must become HTTP-ready before the harness is launched. If LiteLLM wedges during startup, Harness Link exits instead of leaving Codex or Claude hanging. Set `ALBERT_DEBUG=1` to expose LiteLLM logs.
 
 Configuration:
 
@@ -63,11 +70,18 @@ export NVIDIA_API_KEY=...
 
 nim models
 nim opencode
+nim hermes
 nim codex --full-auto
 nim claude -p "review this diff"
 ```
 
-OpenCode talks directly to `https://integrate.api.nvidia.com/v1`. For the hosted API, Codex and Claude use the same loopback compatibility bridge rather than assuming `/v1/responses` or `/v1/messages` is available for every hosted model.
+OpenCode and Hermes connect directly to `https://integrate.api.nvidia.com/v1`. The hosted API's model availability depends on the API key. For faster interactive work, `openai/gpt-oss-20b` is often a useful explicit choice:
+
+```sh
+nim opencode --model openai/gpt-oss-20b
+```
+
+Codex and Claude use the same experimental loopback bridge as Albert. Set `NIM_DEBUG=1` to expose LiteLLM logs.
 
 Configuration:
 
