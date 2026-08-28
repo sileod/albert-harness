@@ -92,7 +92,7 @@ def free_port():
 
 
 def litellm_config(model):
-    return f'''model_list:\n  - model_name: {model}\n    litellm_params:\n      model: openai/chat_completions/{model}\n      api_base: {API_BASE}\n      api_key: os.environ/ALBERT_API_KEY\n'''
+    return f'''litellm_settings:\n  drop_params: true\nmodel_list:\n  - model_name: {model}\n    litellm_params:\n      model: custom_openai/{model}\n      api_base: {API_BASE}\n      api_key: os.environ/ALBERT_API_KEY\n'''
 
 
 def wait_for_port(process, port, timeout=15):
@@ -122,9 +122,11 @@ def run_with_bridge(model, callback):
             file.write(litellm_config(model))
         debug = os.environ.get("ALBERT_DEBUG") == "1"
         stdio = {} if debug else {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+        bridge_env = os.environ.copy()
+        bridge_env.setdefault("LITELLM_USE_CHAT_COMPLETIONS_URL_FOR_ANTHROPIC_MESSAGES", "true")
         process = subprocess.Popen(
             [litellm, "--config", config_path, "--host", "127.0.0.1", "--port", str(port)],
-            env=os.environ.copy(),
+            env=bridge_env,
             **stdio,
         )
         try:
@@ -175,7 +177,6 @@ def cmd_claude(args):
             {
                 "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{port}",
                 "ANTHROPIC_AUTH_TOKEN": "local",
-                "LITELLM_USE_CHAT_COMPLETIONS_URL_FOR_ANTHROPIC_MESSAGES": "true",
             }
         )
         return subprocess.call([executable, "--model", args.model, *args.harness_args], env=env)
@@ -203,18 +204,9 @@ def cmd_models(_args):
             print(model["id"])
 
 
-def cmd_spawn(args):
-    helper = os.path.join(os.path.dirname(os.path.realpath(__file__)), "albert-spawn")
-    if not os.path.isfile(helper):
-        helper = shutil.which("albert-spawn")
-    if not helper:
-        die("albert-spawn helper is missing; reinstall albert-harness")
-    os.execvpe(helper, [helper, *args.harness_args], os.environ.copy())
-
-
 def parser():
     root = argparse.ArgumentParser(prog="albert", description="Run coding harnesses against Albert API")
-    root.add_argument("--version", action="version", version="albert-harness 0.2.0")
+    root.add_argument("--version", action="version", version="albert-harness 0.1.1")
     sub = root.add_subparsers(dest="command", required=True)
 
     for name, handler, help_text in [
@@ -225,9 +217,6 @@ def parser():
         command = sub.add_parser(name, help=help_text)
         command.add_argument("--model", default=DEFAULT_MODEL)
         command.set_defaults(func=handler)
-
-    spawn = sub.add_parser("spawn", help="Run Albert-backed agents on Spawn clouds")
-    spawn.set_defaults(func=cmd_spawn)
 
     models = sub.add_parser("models", help="List model IDs returned by Albert")
     models.set_defaults(func=cmd_models)
