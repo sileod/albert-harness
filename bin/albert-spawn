@@ -7,7 +7,7 @@ import sys
 
 SPAWN_REPO = "https://github.com/OpenRouterLabs/spawn.git"
 SPAWN_REF = os.environ.get("ALBERT_SPAWN_REF", "1bec53ef997634e3e7cc63f8414a702aa1d4c82e")
-PATCH_VERSION = "1"
+PATCH_VERSION = "2"
 DEFAULT_MODEL = os.environ.get("ALBERT_MODEL", "deepseek-v4-flash")
 SUPPORTED_AGENTS = {"opencode", "hermes", "codex", "claude"}
 KNOWN_AGENTS = {
@@ -85,7 +85,7 @@ async function setupAlbertOpenCodeConfig(runner: CloudRunner, _apiKey: string, m
 
 async function setupAlbertLiteLLMBridge(runner: CloudRunner, modelId?: string): Promise<void> {
   const model = modelId || ALBERT_DEFAULT_MODEL;
-  const config = `model_list:\n  - model_name: ${model}\n    litellm_params:\n      model: openai/chat_completions/${model}\n      api_base: ${ALBERT_API_BASE}\n      api_key: os.environ/ALBERT_API_KEY\n`;
+  const config = `litellm_settings:\n  drop_params: true\nmodel_list:\n  - model_name: ${model}\n    litellm_params:\n      model: custom_openai/${model}\n      api_base: ${ALBERT_API_BASE}\n      api_key: os.environ/ALBERT_API_KEY\n`;
   await uploadConfigFile(runner, config, "$HOME/.config/albert/litellm.yaml");
   const script = [
     "source ~/.spawnrc 2>/dev/null",
@@ -256,6 +256,26 @@ def patch_oauth(path):
     path.write_text(replace_once(text, old, new, "API key acquisition"))
 
 
+def patch_sandbox(path):
+    text = path.read_text()
+    old = '''  await runLocalArgs([
+    "docker",
+    "run",
+    "-d",
+    "--name",
+    DOCKER_CONTAINER_NAME,
+    image,
+  ]);'''
+    new = '''  const dockerArgs = ["docker", "run", "-d", "--name", DOCKER_CONTAINER_NAME];
+  const workspace = process.env.ALBERT_WORKSPACE;
+  if (workspace) {
+    dockerArgs.push("-v", `${workspace}:/workspace`, "-w", "/workspace");
+  }
+  dockerArgs.push(image);
+  await runLocalArgs(dockerArgs);'''
+    path.write_text(replace_once(text, old, new, "sandbox workspace mount"))
+
+
 def cache_dir():
     root = os.environ.get("XDG_CACHE_HOME")
     if root:
@@ -287,6 +307,7 @@ def ensure_spawn():
     run([git, "clean", "-fdx"], cwd=checkout)
     patch_agent_setup(checkout / "packages/cli/src/shared/agent-setup.ts")
     patch_oauth(checkout / "packages/cli/src/shared/oauth.ts")
+    patch_sandbox(checkout / "packages/cli/src/local/local.ts")
 
     env = os.environ.copy()
     env["HUSKY"] = "0"
@@ -306,10 +327,37 @@ def with_default_model(args):
     return [*args, "--model", DEFAULT_MODEL]
 
 
+def extract_workspace(args):
+    args = list(args)
+    workspace = None
+    for index, arg in enumerate(list(args)):
+        if arg == "--workspace":
+            if index + 1 >= len(args):
+                die("--workspace requires a path")
+            workspace = args[index + 1]
+            del args[index : index + 2]
+            break
+        if arg.startswith("--workspace="):
+            workspace = arg.split("=", 1)[1]
+            del args[index]
+            break
+
+    is_sandbox = len(args) >= 2 and args[1] == "sandbox"
+    if not is_sandbox:
+        if workspace is not None:
+            die("--workspace is only valid with the sandbox cloud")
+        return args, None
+
+    path = Path(workspace or os.getcwd()).expanduser().resolve()
+    if not path.is_dir():
+        die(f"workspace is not a directory: {path}")
+    return args, str(path)
+
+
 def main():
     if not os.environ.get("ALBERT_API_KEY", "").strip():
         die("ALBERT_API_KEY is not set")
-    args = sys.argv[1:]
+    args, workspace = extract_workspace(sys.argv[1:])
     if args and args[0] in KNOWN_AGENTS and args[0] not in SUPPORTED_AGENTS:
         print(
             f"albert spawn: {args[0]} still uses OpenRouter-specific integration upstream; continuing best-effort",
@@ -318,6 +366,8 @@ def main():
     binary = ensure_spawn()
     env = os.environ.copy()
     env.setdefault("SPAWN_TELEMETRY", "0")
+    if workspace:
+        env["ALBERT_WORKSPACE"] = workspace
     os.execve(binary, [str(binary), *with_default_model(args)], env)
 
 
