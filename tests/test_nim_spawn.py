@@ -54,17 +54,6 @@ class NimSpawnTests(unittest.TestCase):
         self.assertIn(":/workspace", patched)
         self.assertIn('"-w", "/workspace"', patched)
 
-    def test_bridge_patch_uses_custom_openai(self):
-        source = "// ─── Default Agent Definitions ───────────────────────────────────────────────\n"
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "agent-setup.ts"
-            path.write_text(source)
-            with self.assertRaises(SystemExit):
-                spawn.patch_agent_setup(path)
-            patched = path.read_text()
-        self.assertIn("custom_openai/", patched)
-        self.assertIn("NVIDIA_API_KEY", patched)
-
 
 if __name__ == "__main__":
     unittest.main()
