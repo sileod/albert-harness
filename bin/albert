@@ -203,9 +203,18 @@ def cmd_models(_args):
             print(model["id"])
 
 
+def cmd_spawn(args):
+    helper = os.path.join(os.path.dirname(os.path.realpath(__file__)), "albert-spawn")
+    if not os.path.isfile(helper):
+        helper = shutil.which("albert-spawn")
+    if not helper:
+        die("albert-spawn helper is missing; reinstall albert-harness")
+    os.execvpe(helper, [helper, *args.harness_args], os.environ.copy())
+
+
 def parser():
     root = argparse.ArgumentParser(prog="albert", description="Run coding harnesses against Albert API")
-    root.add_argument("--version", action="version", version="albert-harness 0.1.0")
+    root.add_argument("--version", action="version", version="albert-harness 0.2.0")
     sub = root.add_subparsers(dest="command", required=True)
 
     for name, handler, help_text in [
@@ -216,6 +225,9 @@ def parser():
         command = sub.add_parser(name, help=help_text)
         command.add_argument("--model", default=DEFAULT_MODEL)
         command.set_defaults(func=handler)
+
+    spawn = sub.add_parser("spawn", help="Run Albert-backed agents on Spawn clouds")
+    spawn.set_defaults(func=cmd_spawn)
 
     models = sub.add_parser("models", help="List model IDs returned by Albert")
     models.set_defaults(func=cmd_models)
