@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "harness-link"
+dynamic = ["version"]
+description = "Thin provider adapters for coding harnesses"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = ["coding-agents", "opencode", "codex", "claude-code", "albert", "nvidia-nim", "openrouter"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development",
+]
+
+[project.urls]
+Homepage = "https://github.com/sileod/harness-link"
+Repository = "https://github.com/sileod/harness-link"
+Issues = "https://github.com/sileod/harness-link/issues"
+
+[project.scripts]
+harness-link = "harness_link.entrypoints:harness_link"
+harness-link-spawn = "harness_link.entrypoints:harness_link_spawn"
+albert = "harness_link.entrypoints:albert"
+nim = "harness_link.entrypoints:nim"
+orfree = "harness_link.entrypoints:orfree"
+albert-spawn = "harness_link.entrypoints:albert_spawn"
+nim-spawn = "harness_link.entrypoints:nim_spawn"
+orfree-spawn = "harness_link.entrypoints:orfree_spawn"
+
+[tool.setuptools.dynamic]
+version = {attr = "harness_link.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["harness_link*"]
