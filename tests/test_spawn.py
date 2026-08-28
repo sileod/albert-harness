@@ -1,5 +1,6 @@
 import importlib.machinery
 import importlib.util
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -36,6 +37,35 @@ class AlbertSpawnTests(unittest.TestCase):
             patched = path.read_text()
         self.assertIn("process.env.ALBERT_API_KEY", patched)
         self.assertIn("return process.env.ALBERT_API_KEY", patched)
+
+    def test_sandbox_defaults_workspace_to_current_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(tmp)
+                args, workspace = spawn.extract_workspace(["opencode", "sandbox"])
+            finally:
+                os.chdir(old_cwd)
+        self.assertEqual(args, ["opencode", "sandbox"])
+        self.assertEqual(workspace, str(Path(tmp).resolve()))
+
+    def test_explicit_workspace_is_removed_before_spawn(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args, workspace = spawn.extract_workspace(
+                ["hermes", "sandbox", "--workspace", tmp, "--fast"]
+            )
+        self.assertEqual(args, ["hermes", "sandbox", "--fast"])
+        self.assertEqual(workspace, str(Path(tmp).resolve()))
+
+    def test_workspace_rejected_outside_sandbox(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(SystemExit):
+                spawn.extract_workspace(["opencode", "gcp", "--workspace", tmp])
+
+    def test_spawn_bridge_uses_custom_openai(self):
+        source = (ROOT / "bin" / "albert-spawn").read_text()
+        self.assertIn("model: custom_openai/${model}", source)
+        self.assertIn("drop_params: true", source)
 
 
 if __name__ == "__main__":
