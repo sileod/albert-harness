@@ -1,11 +1,15 @@
 #!/bin/sh
 set -eu
 
-repo="${HARNESS_LINK_RAW_BASE:-https://raw.githubusercontent.com/sileod/albert-harness/main/bin}"
+repo="${HARNESS_LINK_RAW_BASE:-https://raw.githubusercontent.com/sileod/harness-link/main/bin}"
 install_dir="${HARNESS_LINK_INSTALL_DIR:-${HARNESS_INSTALL_DIR:-${ALBERT_INSTALL_DIR:-$HOME/.local/bin}}}"
 
 command -v python3 >/dev/null 2>&1 || {
   echo "harness-link: python3 is required" >&2
+  exit 1
+}
+python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' || {
+  echo "harness-link: Python 3.9 or newer is required" >&2
   exit 1
 }
 
