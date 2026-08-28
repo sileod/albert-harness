@@ -1,8 +1,8 @@
-# Albert Harness
+# Harness Link
 
-Ori-like launchers for coding agents, initially built for the French government's Albert API and now also supporting NVIDIA NIM.
+Thin provider adapters for coding harnesses.
 
-Configure a provider once, then launch the harness you already use:
+Harness Link aims for OpenRouter Ori-like ergonomics: configure a provider once, then launch the coding agent you already use. The agent keeps its normal tools, permissions, sessions, skills, and UI. Harness Link only adapts provider configuration and protocol where necessary.
 
 ```sh
 export ALBERT_API_KEY=...
@@ -14,17 +14,19 @@ nim opencode
 nim codex
 ```
 
+Native provider configuration is preferred. A loopback compatibility bridge is used only when the harness requires a protocol the provider does not expose directly.
+
 ## Install
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/sileod/albert-harness/main/install.sh | sh
 ```
 
-This installs the `albert` and `nim` launchers to `~/.local/bin` by default. Override with `HARNESS_INSTALL_DIR` (`ALBERT_INSTALL_DIR` is still accepted for compatibility).
+This installs the user-facing `albert` and `nim` commands plus their small shared Harness Link runtime to `~/.local/bin` by default. Override with `HARNESS_LINK_INSTALL_DIR` or the legacy `ALBERT_INSTALL_DIR`.
 
-## Albert API
+## Albert
 
-The default Albert model is `deepseek-v4-flash`.
+The French government's Albert API uses `ALBERT_API_KEY` and defaults to `deepseek-v4-flash`.
 
 ```sh
 export ALBERT_API_KEY=...
@@ -35,9 +37,11 @@ albert codex --full-auto
 albert claude -p "review this diff"
 ```
 
-OpenCode talks directly to Albert through `@ai-sdk/openai-compatible`, with no proxy in the request path.
+OpenCode talks directly to Albert through `@ai-sdk/openai-compatible`.
 
-Codex and Claude Code use a loopback-only LiteLLM compatibility bridge because Albert exposes Chat Completions while these harnesses use Responses or Anthropic Messages semantics.
+Codex speaks the OpenAI Responses API while Albert currently exposes Chat Completions. `albert codex` therefore starts a loopback-only LiteLLM bridge. Claude Code uses the same bridge for Anthropic Messages and remains experimental.
+
+For Codex and Claude Code:
 
 ```sh
 python -m pip install 'litellm[proxy]'
@@ -52,7 +56,7 @@ export ALBERT_BASE_URL=https://albert.api.etalab.gouv.fr/v1
 
 ## NVIDIA NIM
 
-NVIDIA provides hosted NIM endpoints at `https://integrate.api.nvidia.com/v1`. The default model here is `openai/gpt-oss-120b`.
+NVIDIA's hosted API uses `NVIDIA_API_KEY` and defaults to `openai/gpt-oss-120b`.
 
 ```sh
 export NVIDIA_API_KEY=...
@@ -63,9 +67,7 @@ nim codex --full-auto
 nim claude -p "review this diff"
 ```
 
-OpenCode talks directly to the NVIDIA hosted API through `@ai-sdk/openai-compatible`.
-
-For compatibility with the hosted API surface, Codex and Claude Code use the same loopback LiteLLM bridge pattern as Albert. The bridge sends Chat Completions upstream through LiteLLM's `custom_openai` provider.
+OpenCode talks directly to `https://integrate.api.nvidia.com/v1`. For the hosted API, Codex and Claude use the same loopback compatibility bridge rather than assuming `/v1/responses` or `/v1/messages` is available for every hosted model.
 
 Configuration:
 
@@ -74,50 +76,49 @@ export NIM_MODEL=openai/gpt-oss-120b
 export NIM_BASE_URL=https://integrate.api.nvidia.com/v1
 ```
 
-This also makes it possible to point `nim` at a compatible self-hosted NIM deployment by changing `NIM_BASE_URL` and `NIM_MODEL`.
-
 ## Isolated execution
 
-Spawn support is optional. It provides disposable local Docker sandboxes and remote execution while keeping the same provider configuration.
-
-Protected local sessions persist work in the current directory:
+Spawn integration is optional. It provides disposable local Docker sandboxes and remote machines while keeping the same provider commands.
 
 ```sh
 cd my-project
 albert spawn opencode sandbox
-# or
 nim spawn opencode sandbox
 ```
 
-The current directory is mounted read-write at `/workspace`. The rest of the container is disposable.
+For `sandbox`, the current directory is mounted read-write at `/workspace`. Edits and generated files persist on the host while the rest of the container is disposable.
 
-Use a different workspace explicitly:
+Use another workspace explicitly:
 
 ```sh
 albert spawn hermes sandbox --workspace ~/work/experiment
-nim spawn hermes sandbox --workspace ~/work/experiment
+nim spawn opencode sandbox --workspace ~/work/experiment
 ```
 
-Remote execution uses the same shape:
+Remote execution keeps Spawn's normal command shape:
 
 ```sh
 albert spawn opencode gcp
-nim spawn opencode gcp
-
-albert spawn hermes hetzner --fast
 nim spawn hermes hetzner --fast
 ```
 
-Spawn integration is strongest for OpenCode and Hermes. Codex and Claude use a LiteLLM bridge inside the spawned machine. Spawn support requires `git` and Bun and caches a pinned upstream Spawn build under `~/.cache/albert-harness/`.
+Spawn support requires `git` and Bun. The first invocation downloads and compiles a pinned Spawn revision into the Harness Link cache; later runs reuse it.
 
-## Security
+## Design
 
-Provider API keys stay in environment variables. Generated OpenCode and LiteLLM configuration references those environment variables rather than embedding the keys.
+Harness Link stays deliberately small:
+
+1. Native harness configuration when possible.
+2. A tiny provider adapter when configuration differs.
+3. A loopback bridge only when protocol translation is required.
+4. No hidden provider fallback.
+
+Arguments not consumed by Harness Link are passed through to the selected harness.
 
 ## Development
 
 ```sh
 python -m unittest discover -s tests -v
-python -m py_compile bin/albert bin/albert-spawn bin/nim bin/nim-spawn
+python -m py_compile bin/harness-link bin/harness-link-spawn bin/albert bin/nim bin/albert-spawn bin/nim-spawn
 bash -n install.sh
 ```
