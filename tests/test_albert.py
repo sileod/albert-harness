@@ -44,12 +44,21 @@ class AlbertHarnessTests(unittest.TestCase):
             131072,
         )
 
-    def test_litellm_bridge_uses_custom_openai(self):
+    def test_litellm_bridge_forces_chat_completions(self):
         config = core.litellm_config(self.provider, "deepseek-v4-flash")
-        self.assertIn("model: custom_openai/deepseek-v4-flash", config)
+        self.assertIn('model: "openai/deepseek-v4-flash"', config)
+        self.assertIn("use_chat_completions_api: true", config)
         self.assertIn("drop_params: true", config)
         self.assertIn("api_key: os.environ/ALBERT_API_KEY", config)
+        self.assertNotIn("custom_openai/", config)
         self.assertNotIn(os.environ.get("ALBERT_API_KEY", "secret-that-should-not-appear"), config)
+
+    def test_hermes_is_a_first_class_command(self):
+        parser = core.parser(self.provider)
+        args, rest = parser.parse_known_args(["hermes", "--model", "deepseek-v4-flash", "hello"])
+        self.assertEqual(args.command, "hermes")
+        self.assertEqual(args.model, "deepseek-v4-flash")
+        self.assertEqual(rest, ["hello"])
 
 
 if __name__ == "__main__":
