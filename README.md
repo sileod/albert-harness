@@ -7,52 +7,57 @@ Harness Link aims for OpenRouter Ori-like ergonomics: configure a provider once,
 ```sh
 export ALBERT_API_KEY=...
 albert opencode
-albert hermes
+albert mini
 
 export NVIDIA_API_KEY=...
 nim opencode
-nim hermes
+nim mini
+
+export OPENROUTER_API_KEY=...
+orfree opencode
+orfree mini
 ```
 
 Native provider configuration is preferred. A loopback compatibility bridge is used only when a harness requires a protocol the provider does not expose directly.
 
 ## Install
 
-Python 3.9+ is required.
+From the repository:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/sileod/harness-link/main/install.sh | sh
 ```
 
-This installs the user-facing `albert` and `nim` commands plus their small shared Harness Link runtime to `~/.local/bin` by default. Override with `HARNESS_LINK_INSTALL_DIR`.
+The first PyPI release is prepared as `0.3.0`. Once published:
 
-If you installed from the old `albert-harness` repository, run the command above once to replace stale launchers with the renamed repository's versions.
+```sh
+uv tool install harness-link
+# or
+pipx install harness-link
+```
 
-## Albert
+Harness Link itself requires Python 3.9 or newer. Individual harnesses have their own requirements; current mini-SWE-agent requires Python 3.10 or newer.
+
+## Providers
+
+### Albert
 
 The French government's Albert API uses `ALBERT_API_KEY` and defaults to `deepseek-v4-flash`.
 
 ```sh
-export ALBERT_API_KEY=...
-
 albert models
 albert opencode
 albert hermes
-albert codex --full-auto
-albert claude -p "review this diff"
+albert mini
+albert codex
+albert claude
 ```
 
-OpenCode and Hermes connect directly to Albert's OpenAI-compatible API, with no proxy in the request path.
-
-Codex requires the OpenAI Responses API while Albert currently exposes Chat Completions. `albert codex` therefore starts a loopback-only LiteLLM bridge configured to explicitly translate Responses to Chat Completions. Claude Code uses the same bridge for Anthropic Messages and is experimental.
-
-For Codex and Claude Code:
+OpenCode, Hermes, and mini-SWE-agent connect directly. Codex and Claude Code require the experimental local LiteLLM protocol bridge because Albert currently exposes Chat Completions rather than their native wire APIs.
 
 ```sh
 python -m pip install 'litellm[proxy]'
 ```
-
-The bridge must become HTTP-ready before the harness is launched. If LiteLLM wedges during startup, Harness Link exits instead of leaving Codex or Claude hanging. Set `ALBERT_DEBUG=1` to expose LiteLLM logs.
 
 Configuration:
 
@@ -61,27 +66,20 @@ export ALBERT_MODEL=deepseek-v4-flash
 export ALBERT_BASE_URL=https://albert.api.etalab.gouv.fr/v1
 ```
 
-## NVIDIA NIM
+### NVIDIA NIM
 
 NVIDIA's hosted API uses `NVIDIA_API_KEY` and defaults to `openai/gpt-oss-120b`.
 
 ```sh
-export NVIDIA_API_KEY=...
-
 nim models
-nim opencode
-nim hermes
-nim codex --full-auto
-nim claude -p "review this diff"
-```
-
-OpenCode and Hermes connect directly to `https://integrate.api.nvidia.com/v1`. The hosted API's model availability depends on the API key. For faster interactive work, `openai/gpt-oss-20b` is often a useful explicit choice:
-
-```sh
 nim opencode --model openai/gpt-oss-20b
+nim hermes --model openai/gpt-oss-20b
+nim mini --model openai/gpt-oss-20b
+nim codex --model openai/gpt-oss-20b
+nim claude --model openai/gpt-oss-20b
 ```
 
-Codex and Claude use the same experimental loopback bridge as Albert. Set `NIM_DEBUG=1` to expose LiteLLM logs.
+OpenCode, Hermes, and mini-SWE-agent connect directly. Codex and Claude Code use the experimental local bridge for the hosted Integrate API.
 
 Configuration:
 
@@ -89,6 +87,56 @@ Configuration:
 export NIM_MODEL=openai/gpt-oss-120b
 export NIM_BASE_URL=https://integrate.api.nvidia.com/v1
 ```
+
+### OpenRouter free-only
+
+`orfree` is intentionally not a general OpenRouter wrapper. Use Ori for arbitrary or paid OpenRouter models. Harness Link's OpenRouter backend is constrained to free routes.
+
+By default, `orfree` asks the OpenRouter Models API for tool-capable models sorted by weekly popularity, requires both prompt and completion prices to be zero, and selects the first `:free` model. The result is cached for five minutes. If discovery is unavailable, it falls back to `openrouter/free`.
+
+```sh
+export OPENROUTER_API_KEY=...
+
+orfree models                    # free tool-capable models, most popular first
+orfree opencode                  # automatically chosen free model
+orfree hermes
+orfree mini
+orfree codex
+orfree claude
+```
+
+Pin a free model when desired:
+
+```sh
+orfree opencode --model minimax/minimax-m3:free
+orfree mini --model minimax/minimax-m3:free
+```
+
+Paid model IDs are rejected. `ORFREE_MODEL` can pin a `:free` model globally, and `ORFREE_CACHE_TTL=0` forces fresh discovery on every launch.
+
+Unlike Albert and hosted NIM, OpenRouter already exposes Responses and Anthropic Messages APIs, so `orfree codex` and `orfree claude` connect directly with no compatibility proxy.
+
+## mini-SWE-agent
+
+mini-SWE-agent already uses LiteLLM as a client library, so Harness Link does not run a proxy for it. It supplies a small provider override, keeps mini's normal configuration, disables first-run provider setup, and passes the API key only in the child process environment.
+
+Install mini separately:
+
+```sh
+uv tool install mini-swe-agent
+# or
+pipx install mini-swe-agent
+```
+
+Then:
+
+```sh
+albert mini -t "fix the failing tests"
+nim mini --model openai/gpt-oss-20b -t "implement this feature"
+orfree mini -t "review and improve this repository"
+```
+
+User `-c/--config` files are preserved and merged before Harness Link's final provider override.
 
 ## Isolated execution
 
@@ -98,6 +146,7 @@ Spawn integration is optional. It provides disposable local Docker sandboxes and
 cd my-project
 albert spawn opencode sandbox
 nim spawn opencode sandbox
+orfree spawn opencode sandbox
 ```
 
 For `sandbox`, the current directory is mounted read-write at `/workspace`. Edits and generated files persist on the host while the rest of the container is disposable.
@@ -106,7 +155,6 @@ Use another workspace explicitly:
 
 ```sh
 albert spawn hermes sandbox --workspace ~/work/experiment
-nim spawn opencode sandbox --workspace ~/work/experiment
 ```
 
 Remote execution keeps Spawn's normal command shape:
@@ -114,20 +162,38 @@ Remote execution keeps Spawn's normal command shape:
 ```sh
 albert spawn opencode gcp
 nim spawn hermes hetzner --fast
+orfree spawn codex sprite
 ```
 
-Spawn support requires `git` and Bun. The first invocation downloads and compiles a pinned Spawn revision into the Harness Link cache; later runs reuse it.
+Albert and NIM patch a pinned Spawn revision to use their providers. `orfree` keeps Spawn's native OpenRouter integration and only adds the persistent local sandbox workspace behavior. Spawn support requires `git` and Bun.
 
 ## Design
 
-Harness Link stays deliberately small: native harness configuration when possible, a tiny provider adapter when configuration differs, a loopback bridge only when protocol translation is required, and no hidden provider fallback.
+Harness Link stays deliberately small:
+
+1. native harness configuration when possible;
+2. a tiny provider adapter when configuration differs;
+3. a loopback bridge only when protocol translation is unavoidable;
+4. no hidden provider fallback;
+5. `orfree` never intentionally selects a paid OpenRouter route.
 
 Arguments not consumed by Harness Link are passed through to the selected harness.
 
 ## Development
 
 ```sh
-python -m unittest discover -s tests -v
-python -m py_compile bin/harness-link bin/harness-link-spawn bin/albert bin/nim bin/albert-spawn bin/nim-spawn
-bash -n install.sh
+PYTHONPATH=src python -m unittest discover -s tests -v
+python -m py_compile src/harness_link/*.py bin/harness-link bin/harness-link-spawn bin/albert bin/albert-spawn bin/nim bin/nim-spawn bin/orfree bin/orfree-spawn
+python -m build
 ```
+
+## Release
+
+PyPI publishing is configured through GitHub Actions Trusted Publishing. Create the `harness-link` project (or pending publisher) on PyPI and trust:
+
+- owner: `sileod`
+- repository: `harness-link`
+- workflow: `release.yml`
+- environment: `pypi`
+
+Publishing a GitHub Release then builds the sdist/wheel and publishes them through OIDC; no PyPI API token is stored in the repository.
