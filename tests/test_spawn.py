@@ -89,6 +89,12 @@ class AlbertSpawnTests(unittest.TestCase):
         self.assertIn("process.env.HARNESS_LINK_WORKSPACE", patched)
         self.assertIn(":/workspace", patched)
 
+    def test_spawn_bridge_uses_explicit_chat_completions_mode(self):
+        source = (ROOT / "bin" / "harness-link-spawn").read_text()
+        self.assertIn("use_chat_completions_api: true", source)
+        self.assertIn("health/liveliness", source)
+        self.assertNotIn("custom_openai/${model}", source)
+
 
 if __name__ == "__main__":
     unittest.main()
