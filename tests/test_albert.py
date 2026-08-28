@@ -34,9 +34,14 @@ class AlbertHarnessTests(unittest.TestCase):
             131072,
         )
 
+    def test_litellm_bridge_uses_chat_completions_adapter(self):
+        config = albert.litellm_config("deepseek-v4-flash")
+        self.assertIn("model: custom_openai/deepseek-v4-flash", config)
+        self.assertIn("drop_params: true", config)
+        self.assertNotIn("model: openai/chat_completions/", config)
+
     def test_litellm_bridge_keeps_secret_out_of_config(self):
         config = albert.litellm_config("deepseek-v4-flash")
-        self.assertIn("openai/chat_completions/deepseek-v4-flash", config)
         self.assertIn("api_key: os.environ/ALBERT_API_KEY", config)
         self.assertNotIn(os.environ.get("ALBERT_API_KEY", "secret-that-should-not-appear"), config)
 
