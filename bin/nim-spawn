@@ -1,0 +1,378 @@
+#!/usr/bin/env python3
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+SPAWN_REPO = "https://github.com/OpenRouterLabs/spawn.git"
+SPAWN_REF = os.environ.get("NIM_SPAWN_REF", "1bec53ef997634e3e7cc63f8414a702aa1d4c82e")
+PATCH_VERSION = "1"
+DEFAULT_MODEL = os.environ.get("NIM_MODEL", "openai/gpt-oss-120b")
+SUPPORTED_AGENTS = {"opencode", "hermes", "codex", "claude"}
+KNOWN_AGENTS = {
+    "claude",
+    "openclaw",
+    "codex",
+    "opencode",
+    "kilocode",
+    "hermes",
+    "junie",
+    "pi",
+    "t3code",
+    "cursor",
+}
+
+
+def die(message, code=1):
+    print(f"nim spawn: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def require_command(name, hint):
+    path = shutil.which(name)
+    if not path:
+        die(f"{name} is required. {hint}")
+    return path
+
+
+def run(command, cwd=None, env=None, capture=False):
+    kwargs = {"cwd": cwd, "env": env, "check": True}
+    if capture:
+        kwargs.update(text=True, stdout=subprocess.PIPE)
+    try:
+        return subprocess.run(command, **kwargs)
+    except subprocess.CalledProcessError as exc:
+        die(f"command failed ({exc.returncode}): {' '.join(map(str, command))}")
+
+
+def replace_once(text, old, new, label):
+    count = text.count(old)
+    if count != 1:
+        die(f"upstream Spawn changed around {label}; expected one match, found {count}")
+    return text.replace(old, new, 1)
+
+
+def patch_agent_setup(path):
+    text = path.read_text()
+    marker = "// ─── Default Agent Definitions ───────────────────────────────────────────────\n"
+    helpers = r'''const NIM_API_BASE = process.env.NIM_BASE_URL || "https://integrate.api.nvidia.com/v1";
+const NIM_DEFAULT_MODEL = process.env.NIM_MODEL || "openai/gpt-oss-120b";
+const NIM_PROXY_PORT = 4142;
+
+async function setupNimOpenCodeConfig(runner: CloudRunner, _apiKey: string, modelId?: string): Promise<void> {
+  const model = modelId || NIM_DEFAULT_MODEL;
+  const config = JSON.stringify({
+    $schema: "https://opencode.ai/config.json",
+    provider: {
+      nim: {
+        npm: "@ai-sdk/openai-compatible",
+        name: "NVIDIA NIM",
+        options: { baseURL: NIM_API_BASE, apiKey: "{env:NVIDIA_API_KEY}" },
+        models: { [model]: { name: model } },
+      },
+    },
+    model: `nim/${model}`,
+    small_model: `nim/${model}`,
+  }, null, 2) + "\n";
+  await uploadConfigFile(runner, config, "$HOME/.config/opencode/opencode.json");
+}
+
+async function setupNimLiteLLMBridge(runner: CloudRunner, modelId?: string): Promise<void> {
+  const model = modelId || NIM_DEFAULT_MODEL;
+  const config = `litellm_settings:\n  drop_params: true\nmodel_list:\n  - model_name: ${model}\n    litellm_params:\n      model: custom_openai/${model}\n      api_base: ${NIM_API_BASE}\n      api_key: os.environ/NVIDIA_API_KEY\n`;
+  await uploadConfigFile(runner, config, "$HOME/.config/nim/litellm.yaml");
+  const script = [
+    "source ~/.spawnrc 2>/dev/null",
+    "export PATH=$HOME/.local/bin:$PATH",
+    "_venv=$HOME/.local/share/nim-litellm",
+    "if [ ! -x $_venv/bin/litellm ]; then",
+    "  python3 -m venv $_venv 2>/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-venv; python3 -m venv $_venv; }",
+    "  $_venv/bin/pip install -q 'litellm[proxy]'",
+    "fi",
+    "pkill -f 'litellm.*nim/litellm.yaml' 2>/dev/null || true",
+    "export LITELLM_USE_CHAT_COMPLETIONS_URL_FOR_ANTHROPIC_MESSAGES=true",
+    `nohup $_venv/bin/litellm --config $HOME/.config/nim/litellm.yaml --host 127.0.0.1 --port ${NIM_PROXY_PORT} >$HOME/.config/nim/litellm.log 2>&1 </dev/null &`,
+    `for _i in $(seq 1 60); do nc -z 127.0.0.1 ${NIM_PROXY_PORT} 2>/dev/null && exit 0; sleep 1; done`,
+    "tail -40 $HOME/.config/nim/litellm.log >&2 || true",
+    "exit 1",
+  ].join("\n");
+  await runner.runServer(script, 300);
+}
+
+async function setupNimCodexConfig(runner: CloudRunner, _apiKey: string, modelId?: string): Promise<void> {
+  const model = modelId || NIM_DEFAULT_MODEL;
+  await setupNimLiteLLMBridge(runner, model);
+  const config = `model = "${model}"
+model_provider = "nim"
+sandbox_mode = "danger-full-access"
+
+[model_providers.nim]
+name = "NVIDIA NIM"
+base_url = "http://127.0.0.1:${NIM_PROXY_PORT}/v1"
+env_key = "NIM_PROXY_KEY"
+wire_api = "responses"
+`;
+  await uploadConfigFile(runner, config, "$HOME/.codex/config.toml");
+}
+
+async function setupNimClaudeConfig(runner: CloudRunner, _apiKey: string, modelId?: string): Promise<void> {
+  const model = modelId || NIM_DEFAULT_MODEL;
+  await setupNimLiteLLMBridge(runner, model);
+  const settings = JSON.stringify({
+    theme: "dark",
+    editor: "vim",
+    env: {
+      CLAUDE_CODE_ENABLE_TELEMETRY: "0",
+      ANTHROPIC_BASE_URL: `http://127.0.0.1:${NIM_PROXY_PORT}`,
+      ANTHROPIC_AUTH_TOKEN: "local",
+      ANTHROPIC_MODEL: model,
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: model,
+      ANTHROPIC_DEFAULT_OPUS_MODEL: model,
+      ANTHROPIC_DEFAULT_SONNET_MODEL: model,
+      CLAUDE_CODE_SUBAGENT_MODEL: model,
+    },
+    permissions: { defaultMode: "bypassPermissions", dangerouslySkipPermissions: true },
+  }, null, 2) + "\n";
+  await uploadConfigFile(runner, settings, "$HOME/.claude/settings.json");
+  await runner.runServer('printf \'{"hasCompletedOnboarding":true,"bypassPermissionsModeAccepted":true,"projects":{"%s":{"hasTrustDialogAccepted":true}}}\\n\' "$HOME" > ~/.claude.json && chmod 600 ~/.claude.json');
+}
+
+'''
+    text = replace_once(text, marker, helpers + marker, "NIM helper insertion")
+
+    old = '''    claude: {
+      name: "Claude Code",
+      cloudInitTier: "minimal",
+      preProvision: detectGithubAuth,
+      install: () => installClaudeCode(runner),
+      envVars: (apiKey) => [
+        `OPENROUTER_API_KEY=${apiKey}`,
+        "ANTHROPIC_BASE_URL=https://openrouter.ai/api",
+        `ANTHROPIC_AUTH_TOKEN=${apiKey}`,
+        "ANTHROPIC_API_KEY=",
+        "CLAUDE_CODE_SKIP_ONBOARDING=1",
+        "CLAUDE_CODE_ENABLE_TELEMETRY=0",
+      ],
+      configure: (apiKey) => setupClaudeCodeConfig(runner, apiKey),'''
+    new = '''    claude: {
+      name: "Claude Code",
+      cloudInitTier: "minimal",
+      modelDefault: NIM_DEFAULT_MODEL,
+      preProvision: detectGithubAuth,
+      install: () => installClaudeCode(runner),
+      envVars: (apiKey) => [
+        `NVIDIA_API_KEY=${apiKey}`,
+        "NIM_PROXY_KEY=local",
+        `ANTHROPIC_BASE_URL=http://127.0.0.1:${NIM_PROXY_PORT}`,
+        "ANTHROPIC_AUTH_TOKEN=local",
+        "ANTHROPIC_API_KEY=",
+        `ANTHROPIC_MODEL=${NIM_DEFAULT_MODEL}`,
+        `ANTHROPIC_DEFAULT_HAIKU_MODEL=${NIM_DEFAULT_MODEL}`,
+        `ANTHROPIC_DEFAULT_OPUS_MODEL=${NIM_DEFAULT_MODEL}`,
+        `ANTHROPIC_DEFAULT_SONNET_MODEL=${NIM_DEFAULT_MODEL}`,
+        `CLAUDE_CODE_SUBAGENT_MODEL=${NIM_DEFAULT_MODEL}`,
+        "CLAUDE_CODE_SKIP_ONBOARDING=1",
+        "CLAUDE_CODE_ENABLE_TELEMETRY=0",
+      ],
+      configure: (apiKey, modelId) => setupNimClaudeConfig(runner, apiKey, modelId),'''
+    text = replace_once(text, old, new, "Claude provider")
+
+    old = '''    codex: {
+      name: "Codex CLI",
+      cloudInitTier: "node",
+      preProvision: detectGithubAuth,'''
+    new = '''    codex: {
+      name: "Codex CLI",
+      cloudInitTier: "node",
+      modelDefault: NIM_DEFAULT_MODEL,
+      preProvision: detectGithubAuth,'''
+    text = replace_once(text, old, new, "Codex model")
+    old = '''      envVars: (apiKey) => [
+        `OPENROUTER_API_KEY=${apiKey}`,
+      ],
+      configure: () => setupCodexConfig(runner),'''
+    new = '''      envVars: (apiKey) => [
+        `NVIDIA_API_KEY=${apiKey}`,
+        "NIM_PROXY_KEY=local",
+      ],
+      configure: (apiKey, modelId) => setupNimCodexConfig(runner, apiKey, modelId),'''
+    text = replace_once(text, old, new, "Codex provider")
+
+    old = '''    opencode: {
+      name: "OpenCode",
+      cloudInitTier: "minimal",
+      preProvision: detectGithubAuth,
+      install: () => installAgent(runner, "OpenCode", openCodeInstallCmd()),
+      envVars: (apiKey) => [
+        `OPENROUTER_API_KEY=${apiKey}`,
+      ],
+      launchCmd: () => "source ~/.spawnrc 2>/dev/null; source ~/.zshrc 2>/dev/null; opencode",'''
+    new = '''    opencode: {
+      name: "OpenCode",
+      cloudInitTier: "minimal",
+      modelDefault: NIM_DEFAULT_MODEL,
+      preProvision: detectGithubAuth,
+      install: () => installAgent(runner, "OpenCode", openCodeInstallCmd()),
+      envVars: (apiKey) => [
+        `NVIDIA_API_KEY=${apiKey}`,
+      ],
+      configure: (apiKey, modelId) => setupNimOpenCodeConfig(runner, apiKey, modelId),
+      launchCmd: () => "source ~/.spawnrc 2>/dev/null; source ~/.zshrc 2>/dev/null; opencode",'''
+    text = replace_once(text, old, new, "OpenCode provider")
+
+    old = '''    hermes: {
+      name: "Hermes Agent",
+      cloudInitTier: "minimal",
+      modelEnvVar: "LLM_MODEL",'''
+    new = '''    hermes: {
+      name: "Hermes Agent",
+      cloudInitTier: "minimal",
+      modelDefault: NIM_DEFAULT_MODEL,
+      modelEnvVar: "LLM_MODEL",'''
+    text = replace_once(text, old, new, "Hermes model")
+    old = '''      envVars: (apiKey) => [
+        `OPENROUTER_API_KEY=${apiKey}`,
+        "OPENAI_BASE_URL=https://openrouter.ai/api/v1",
+        `OPENAI_API_KEY=${apiKey}`,
+        "HERMES_YOLO_MODE=1",
+      ],'''
+    new = '''      envVars: (apiKey) => [
+        `NVIDIA_API_KEY=${apiKey}`,
+        `OPENAI_BASE_URL=${NIM_API_BASE}`,
+        `OPENAI_API_KEY=${apiKey}`,
+        "HERMES_YOLO_MODE=1",
+      ],'''
+    text = replace_once(text, old, new, "Hermes provider")
+    path.write_text(text)
+
+
+def patch_oauth(path):
+    text = path.read_text()
+    old = '''export async function getOrPromptApiKey(agentSlug?: string, cloudSlug?: string): Promise<string> {
+  process.stderr.write("\\n");'''
+    new = '''export async function getOrPromptApiKey(agentSlug?: string, cloudSlug?: string): Promise<string> {
+  if (process.env.NVIDIA_API_KEY) {
+    return process.env.NVIDIA_API_KEY;
+  }
+  process.stderr.write("\\n");'''
+    path.write_text(replace_once(text, old, new, "API key acquisition"))
+
+
+def patch_sandbox(path):
+    text = path.read_text()
+    old = '''  await runLocalArgs([
+    "docker",
+    "run",
+    "-d",
+    "--name",
+    DOCKER_CONTAINER_NAME,
+    image,
+  ]);'''
+    new = '''  const dockerArgs = ["docker", "run", "-d", "--name", DOCKER_CONTAINER_NAME];
+  const workspace = process.env.NIM_WORKSPACE;
+  if (workspace) {
+    dockerArgs.push("-v", `${workspace}:/workspace`, "-w", "/workspace");
+  }
+  dockerArgs.push(image);
+  await runLocalArgs(dockerArgs);'''
+    path.write_text(replace_once(text, old, new, "sandbox workspace mount"))
+
+
+def cache_dir():
+    root = os.environ.get("XDG_CACHE_HOME")
+    if root:
+        return Path(root).expanduser() / "albert-harness" / "nim-spawn"
+    return Path.home() / ".cache" / "albert-harness" / "nim-spawn"
+
+
+def ensure_spawn():
+    git = require_command("git", "Install git first.")
+    bun = require_command("bun", "Install Bun from https://bun.sh/.")
+    root = cache_dir()
+    checkout = root / "src"
+    binary = root / "spawn"
+    stamp = root / "stamp"
+    root.mkdir(parents=True, exist_ok=True)
+
+    if not (checkout / ".git").exists():
+        if checkout.exists():
+            shutil.rmtree(checkout)
+        run([git, "clone", "--filter=blob:none", "--no-checkout", SPAWN_REPO, str(checkout)])
+
+    run([git, "fetch", "--depth", "1", "origin", SPAWN_REF], cwd=checkout)
+    resolved = run([git, "rev-parse", "FETCH_HEAD"], cwd=checkout, capture=True).stdout.strip()
+    expected_stamp = f"{resolved}:{PATCH_VERSION}"
+    if binary.exists() and stamp.exists() and stamp.read_text().strip() == expected_stamp:
+        return binary
+
+    run([git, "reset", "--hard", "FETCH_HEAD"], cwd=checkout)
+    run([git, "clean", "-fdx"], cwd=checkout)
+    patch_agent_setup(checkout / "packages/cli/src/shared/agent-setup.ts")
+    patch_oauth(checkout / "packages/cli/src/shared/oauth.ts")
+    patch_sandbox(checkout / "packages/cli/src/local/local.ts")
+
+    env = os.environ.copy()
+    env["HUSKY"] = "0"
+    run([bun, "install", "--frozen-lockfile"], cwd=checkout, env=env)
+    run([bun, "run", "compile"], cwd=checkout / "packages/cli", env=env)
+    shutil.copy2(checkout / "packages/cli/spawn", binary)
+    binary.chmod(0o755)
+    stamp.write_text(expected_stamp + "\n")
+    return binary
+
+
+def with_default_model(args):
+    if not args or args[0] not in SUPPORTED_AGENTS:
+        return args
+    if "--model" in args:
+        return args
+    return [*args, "--model", DEFAULT_MODEL]
+
+
+def extract_workspace(args):
+    args = list(args)
+    workspace = None
+    for index, arg in enumerate(list(args)):
+        if arg == "--workspace":
+            if index + 1 >= len(args):
+                die("--workspace requires a path")
+            workspace = args[index + 1]
+            del args[index : index + 2]
+            break
+        if arg.startswith("--workspace="):
+            workspace = arg.split("=", 1)[1]
+            del args[index]
+            break
+
+    is_sandbox = len(args) >= 2 and args[1] == "sandbox"
+    if not is_sandbox:
+        if workspace is not None:
+            die("--workspace is only valid with the sandbox cloud")
+        return args, None
+
+    path = Path(workspace or os.getcwd()).expanduser().resolve()
+    if not path.is_dir():
+        die(f"workspace is not a directory: {path}")
+    return args, str(path)
+
+
+def main():
+    if not os.environ.get("NVIDIA_API_KEY", "").strip():
+        die("NVIDIA_API_KEY is not set")
+    args, workspace = extract_workspace(sys.argv[1:])
+    if args and args[0] in KNOWN_AGENTS and args[0] not in SUPPORTED_AGENTS:
+        print(
+            f"nim spawn: {args[0]} still uses OpenRouter-specific integration upstream; continuing best-effort",
+            file=sys.stderr,
+        )
+    binary = ensure_spawn()
+    env = os.environ.copy()
+    env.setdefault("SPAWN_TELEMETRY", "0")
+    if workspace:
+        env["NIM_WORKSPACE"] = workspace
+    os.execve(binary, [str(binary), *with_default_model(args)], env)
+
+
+if __name__ == "__main__":
+    main()
