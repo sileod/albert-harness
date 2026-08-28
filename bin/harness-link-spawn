@@ -8,7 +8,7 @@ import sys
 
 SPAWN_REPO = "https://github.com/OpenRouterLabs/spawn.git"
 DEFAULT_SPAWN_REF = "1bec53ef997634e3e7cc63f8414a702aa1d4c82e"
-PATCH_VERSION = "3"
+PATCH_VERSION = "4"
 SUPPORTED_AGENTS = {"opencode", "hermes", "codex", "claude"}
 KNOWN_AGENTS = {
     "claude",
@@ -144,9 +144,19 @@ async function setupHarnessLinkOpenCodeConfig(runner: CloudRunner, _apiKey: stri
 
 async function setupHarnessLinkLiteLLMBridge(runner: CloudRunner, modelId?: string): Promise<void> {
   const model = modelId || HL_DEFAULT_MODEL;
-  const config = `litellm_settings:\n  drop_params: true\nmodel_list:\n  - model_name: ${model}\n    litellm_params:\n      model: custom_openai/${model}\n      api_base: ${HL_API_BASE}\n      api_key: os.environ/@@KEY_ENV@@\n`;
+  const config = [
+    "litellm_settings:",
+    "  drop_params: true",
+    "model_list:",
+    `  - model_name: ${JSON.stringify(model)}`,
+    "    litellm_params:",
+    `      model: ${JSON.stringify(`openai/${model}`)}`,
+    `      api_base: ${JSON.stringify(HL_API_BASE)}`,
+    "      api_key: os.environ/@@KEY_ENV@@",
+    "      use_chat_completions_api: true",
+    "",
+  ].join("\n");
   const configDir = `$HOME/.config/harness-link/${HL_PROVIDER}`;
-  await runner.runServer(`mkdir -p ${configDir}`);
   await uploadConfigFile(runner, config, `${configDir}/litellm.yaml`);
   const script = [
     "source ~/.spawnrc 2>/dev/null",
@@ -159,7 +169,7 @@ async function setupHarnessLinkLiteLLMBridge(runner: CloudRunner, modelId?: stri
     `pkill -f 'litellm.*harness-link/${HL_PROVIDER}/litellm.yaml' 2>/dev/null || true`,
     "export LITELLM_USE_CHAT_COMPLETIONS_URL_FOR_ANTHROPIC_MESSAGES=true",
     `nohup $_venv/bin/litellm --config $HOME/.config/harness-link/${HL_PROVIDER}/litellm.yaml --host 127.0.0.1 --port ${HL_PROXY_PORT} >$HOME/.config/harness-link/${HL_PROVIDER}/litellm.log 2>&1 </dev/null &`,
-    `for _i in $(seq 1 60); do nc -z 127.0.0.1 ${HL_PROXY_PORT} 2>/dev/null && exit 0; sleep 1; done`,
+    `for _i in $(seq 1 30); do curl -fsS http://127.0.0.1:${HL_PROXY_PORT}/health/liveliness >/dev/null 2>&1 && exit 0; sleep 1; done`,
     `tail -40 $HOME/.config/harness-link/${HL_PROVIDER}/litellm.log >&2 || true`,
     "exit 1",
   ].join("\n");
@@ -192,6 +202,7 @@ async function setupHarnessLinkClaudeConfig(runner: CloudRunner, _apiKey: string
       CLAUDE_CODE_ENABLE_TELEMETRY: "0",
       ANTHROPIC_BASE_URL: `http://127.0.0.1:${HL_PROXY_PORT}`,
       ANTHROPIC_AUTH_TOKEN: "local",
+      ANTHROPIC_API_KEY: "",
       ANTHROPIC_MODEL: model,
       ANTHROPIC_DEFAULT_HAIKU_MODEL: model,
       ANTHROPIC_DEFAULT_OPUS_MODEL: model,
