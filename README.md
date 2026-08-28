@@ -1,15 +1,20 @@
 # Albert Harness
 
-Use one `ALBERT_API_KEY` with coding harnesses:
+Use one `ALBERT_API_KEY` with local coding harnesses and cloud agents.
 
 ```sh
 export ALBERT_API_KEY=...
+
 albert opencode
 albert codex
-albert claude   # experimental
+albert claude
+
+albert spawn opencode gcp
+albert spawn hermes hetzner
+albert spawn codex sprite
 ```
 
-The goal is the same ergonomics as OpenRouter's Ori harness launcher, but for the French government's [Albert API](https://albert.api.etalab.gouv.fr/).
+The default model is `deepseek-v4-flash`.
 
 ## Install
 
@@ -17,17 +22,9 @@ The goal is the same ergonomics as OpenRouter's Ori harness launcher, but for th
 curl -fsSL https://raw.githubusercontent.com/sileod/albert-harness/main/install.sh | sh
 ```
 
-This installs `albert` to `~/.local/bin` by default. Override with `ALBERT_INSTALL_DIR`.
+This installs `albert` and its Spawn adapter to `~/.local/bin` by default. Override with `ALBERT_INSTALL_DIR`.
 
-`albert` itself only needs Python 3. OpenCode talks to Albert directly. Codex and Claude Code currently need a local protocol bridge because Albert exposes OpenAI Chat Completions while current Codex speaks Responses and Claude Code speaks Anthropic Messages:
-
-```sh
-python -m pip install 'litellm[proxy]'
-```
-
-Your Albert key is never written to the generated OpenCode or LiteLLM configuration. The runtime references `ALBERT_API_KEY` from the environment.
-
-## Usage
+## Local harnesses
 
 ```sh
 albert models
@@ -36,36 +33,71 @@ albert codex --model deepseek-v4-flash --full-auto
 albert claude --model deepseek-v4-flash -p "review this diff"
 ```
 
-Arguments after the harness options are passed through unchanged. `ALBERT_MODEL` changes the default model. `ALBERT_BASE_URL` can override the API endpoint for development.
+OpenCode talks to Albert directly through its OpenAI-compatible provider interface.
 
-The default is the canonical Albert model ID `deepseek-v4-flash`, with a 131072-token context window and 65536-token output limit, matching the current DINUM `albert-code` configuration.
+Codex uses a loopback-only LiteLLM bridge because current Codex speaks the Responses API while Albert exposes Chat Completions. Claude Code uses the same bridge for Anthropic Messages and is experimental.
 
-### OpenCode
+For Codex and Claude Code:
 
-`albert opencode` injects an inline `provider.albert` configuration via `OPENCODE_CONFIG_CONTENT`. Existing inline configuration is merged rather than discarded. It uses `@ai-sdk/openai-compatible` against:
-
-```text
-https://albert.api.etalab.gouv.fr/v1
+```sh
+python -m pip install 'litellm[proxy]'
 ```
 
-No proxy is involved.
+Arguments not consumed by `albert` are passed through to the harness.
 
-### Codex
+## Spawn
 
-Recent Codex versions no longer support Chat Completions providers. `albert codex` therefore starts a loopback-only LiteLLM process that translates Codex's `/v1/responses` traffic to Albert's `/v1/chat/completions`, then launches the installed `codex` binary with temporary CLI config overrides. Nothing is written to `~/.codex/config.toml`.
+`albert spawn` reuses [OpenRouterLabs/spawn](https://github.com/OpenRouterLabs/spawn) for provisioning and lifecycle management while configuring the remote agent for Albert.
 
-### Claude Code
+```sh
+albert spawn opencode gcp
+albert spawn hermes hetzner --fast
+albert spawn codex sprite -p "fix the tests"
+albert spawn claude digitalocean
 
-`albert claude` uses the same loopback bridge and points Claude Code's Anthropic Messages traffic at it. This path is **experimental** because third-party Messages-to-Chat translation is less mature than the Codex Responses bridge.
+albert spawn matrix
+albert spawn list
+albert spawn status
+albert spawn delete
+```
 
-## Why not fork Ori?
+The existing Spawn cloud options are passed through, including GCP, Hetzner, DigitalOcean, AWS, Sprite, Daytona, local, and sandbox.
 
-OpenRouter publishes Ori binaries under Apache-2.0, but its public `ori-releases` repository explicitly says it is a distribution mirror and contains no source. Until the actual source tree is published, this project can reuse the launcher idea and documented behavior, but cannot honestly reuse Ori's harness implementation.
+Albert support is strongest for:
 
-If that source becomes available, the preferred direction is to replace these adapters with a small Albert provider implementation on top of Ori's harness layer.
+| Agent | Albert connection |
+|---|---|
+| OpenCode | direct OpenAI-compatible API |
+| Hermes | direct OpenAI-compatible API |
+| Codex | LiteLLM bridge inside the spawned machine |
+| Claude Code | LiteLLM bridge inside the spawned machine, experimental |
+
+Other Spawn agents are still available as best-effort passthroughs, but some have OpenRouter-specific provider integrations and may not work with Albert yet.
+
+Spawn support requires `git` and [Bun](https://bun.sh/). On first use, `albert spawn` downloads a pinned Spawn source revision into `~/.cache/albert-harness/spawn`, applies the Albert adapter, and compiles it. Subsequent runs use the cached binary.
+
+To try another Spawn revision:
+
+```sh
+ALBERT_SPAWN_REF=main albert spawn matrix
+```
+
+## Configuration
+
+```sh
+export ALBERT_API_KEY=...
+export ALBERT_MODEL=deepseek-v4-flash
+export ALBERT_BASE_URL=https://albert.api.etalab.gouv.fr/v1
+```
+
+The Albert key stays in the environment. Generated OpenCode and LiteLLM configuration references the environment variable rather than embedding the key.
+
+The default model limits used for OpenCode are a 131072-token context window and 65536-token output limit.
 
 ## Development
 
 ```sh
 python -m unittest discover -s tests -v
+python -m py_compile bin/albert bin/albert-spawn
+bash -n install.sh
 ```
