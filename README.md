@@ -20,6 +20,58 @@ orfree mini
 
 Native provider configuration is preferred. A loopback compatibility bridge is used only when a harness requires a protocol the provider does not expose directly.
 
+## Unified harness CLI
+
+`hlink` adds a thin harness-first interface while keeping the existing provider-first commands unchanged.
+
+```sh
+hlink claude -p "review the code" --yolo
+hlink codex -p "review the code" --yolo
+hlink opencode -p "review the code" --yolo
+hlink hermes -p "review the code" --yolo
+hlink mini -p "review the code" --yolo
+hlink agy -p "review the code" --yolo
+```
+
+The normalized surface is deliberately small:
+
+```text
+-p, --prompt TEXT       run one task and exit; use "-" to read stdin
+-m, --model MODEL       override model
+-y, --yolo              use the harness native unattended mode
+-C, --cwd PATH          run in this working directory
+    --provider NAME     run through a Harness Link provider
+--                      pass all remaining arguments to the native harness
+```
+
+Without `-p`, the selected harness keeps its normal interactive behavior. `--yolo` maps to the closest native unattended/auto-approval mode; exact permission semantics remain harness-specific.
+
+```sh
+hlink claude
+hlink codex -C ~/work/repo -p "fix the failing tests" -y
+git diff | hlink hermes -p -
+hlink agy -p "review this" -- --effort high
+```
+
+Provider selection composes with the same interface:
+
+```sh
+hlink opencode --provider albert -p "review the code" -y
+hlink hermes --provider nim -m openai/gpt-oss-20b -p "fix the tests" -y
+hlink mini --provider orfree -p "review this repository" -y
+```
+
+Provider overrides currently apply to `claude`, `codex`, `opencode`, `hermes`, and `mini`. `agy` uses its native provider configuration. Long aliases `claude-code`, `mini-swe-agent`, and `antigravity` are accepted, but the short harness names are canonical.
+
+The original interfaces remain supported for backward compatibility:
+
+```sh
+harness-link albert opencode
+albert opencode
+nim hermes
+orfree mini
+```
+
 ## Install
 
 From the repository:
@@ -177,13 +229,13 @@ Harness Link stays deliberately small:
 4. no hidden provider fallback;
 5. `orfree` never intentionally selects a paid OpenRouter route.
 
-Arguments not consumed by Harness Link are passed through to the selected harness.
+Arguments not consumed by Harness Link are passed through to the selected harness. The `hlink` frontend requires an explicit `--` before native-only arguments so misspelled normalized options fail early instead of being silently forwarded.
 
 ## Development
 
 ```sh
 PYTHONPATH=src python -m unittest discover -s tests -v
-python -m py_compile src/harness_link/*.py bin/harness-link bin/harness-link-spawn bin/albert bin/albert-spawn bin/nim bin/nim-spawn bin/orfree bin/orfree-spawn
+python -m py_compile src/harness_link/*.py bin/harness-link bin/hlink bin/harness-link-spawn bin/albert bin/albert-spawn bin/nim bin/nim-spawn bin/orfree bin/orfree-spawn
 python -m build
 ```
 

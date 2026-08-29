@@ -32,6 +32,7 @@ Issues = "https://github.com/sileod/harness-link/issues"
 
 [project.scripts]
 harness-link = "harness_link.entrypoints:harness_link"
+hlink = "harness_link.entrypoints:hlink"
 harness-link-spawn = "harness_link.entrypoints:harness_link_spawn"
 albert = "harness_link.entrypoints:albert"
 nim = "harness_link.entrypoints:nim"

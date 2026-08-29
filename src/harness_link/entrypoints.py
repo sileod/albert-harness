@@ -1,10 +1,14 @@
 import sys
 
-from . import cli, spawn
+from . import cli, hlink as hlink_cli, spawn
 
 
 def harness_link():
     cli.main()
+
+
+def hlink():
+    hlink_cli.main()
 
 
 def harness_link_spawn():

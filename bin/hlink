@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+from pathlib import Path
+import sys
+
+try:
+    from harness_link.hlink import main
+except ModuleNotFoundError:
+    source = Path(__file__).resolve().parents[1] / "src"
+    if source.is_dir():
+        sys.path.insert(0, str(source))
+    from harness_link.hlink import main
+
+main()
